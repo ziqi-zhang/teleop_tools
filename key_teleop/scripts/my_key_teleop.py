@@ -12,6 +12,7 @@ import math
 
 import rospy
 from geometry_msgs.msg import Twist
+from std_msgs.msg._Char import Char
 
 class Velocity(object):
 
@@ -82,32 +83,28 @@ class KeyTeleop():
     _linear = None
     _angular = None
 
+
     def __init__(self, interface):
         self._interface = interface
         self._pub_cmd = rospy.Publisher('key_vel', Twist)
+        self._pub_key_cmd = rospy.Publisher('key_cmd', Char)
 
         self._hz = rospy.get_param('~hz', 10)
 
         self._num_steps = rospy.get_param('~turbo/steps', 4)
 
-        forward_min = rospy.get_param('~turbo/linear_forward_min', 0.5)
-        forward_max = rospy.get_param('~turbo/linear_forward_max', 1.0)
-        self._forward = Velocity(forward_min, forward_max, self._num_steps)
+        self._cmd_char = -1
+        self._cmd_last_char = -1
 
-        backward_min = rospy.get_param('~turbo/linear_backward_min', 0.25)
-        backward_max = rospy.get_param('~turbo/linear_backward_max', 0.5)
-        self._backward = Velocity(backward_min, backward_max, self._num_steps)
-
-        angular_min = rospy.get_param('~turbo/angular_min', 0.7)
-        angular_max = rospy.get_param('~turbo/angular_max', 1.2)
-        self._rotation = Velocity(angular_min, angular_max, self._num_steps)
+	self.max_speed = 10
 
     def run(self):
         self._linear = 0
         self._angular = 0
 
         rate = rospy.Rate(self._hz)
-        while True:
+        self._running = True
+        while self._running:
             keycode = self._interface.read_key()
             if keycode:
                 if self._key_pressed(keycode):
@@ -118,11 +115,13 @@ class KeyTeleop():
 
     def _get_twist(self, linear, angular):
         twist = Twist()
-        if linear >= 0:
-            twist.linear.x = self._forward(1.0, linear)
-        else:
-            twist.linear.x = self._backward(-1.0, -linear)
-        twist.angular.z = self._rotation(math.copysign(1, angular), abs(angular))
+#        if linear >= 0:
+#            twist.linear.y = self._forward(1.0, linear)
+#        else:
+#            twist.linear.y = self._backward(-1.0, -linear)
+#        twist.angular.z = self._rotation(math.copysign(1, angular), abs(angular))
+	twist.linear.y = linear
+	twist.angular.z = angular
         return twist
 
     def _key_pressed(self, keycode):
@@ -140,14 +139,22 @@ class KeyTeleop():
             ok = False
             if acc[0]:
                 linear = self._linear + acc[0]
-                if abs(linear) <= self._num_steps:
-                    self._linear = linear
-                    ok = True
+#                if abs(linear) <= self._num_steps:
+#                    self._linear = linear
+#                    ok = True
+		if( abs(linear)<=self.max_speed ):
+			self._linear = linear
+			self._angular = 0
+			ok = True
             if acc[1]:
                 angular = self._angular + acc[1]
-                if abs(angular) <= self._num_steps:
-                    self._angular = angular
-                    ok = True
+#                if abs(angular) <= self._num_steps:
+#                    self._angular = angular
+#                    ok = True
+		if( abs(angular)<=self.max_speed ):
+			self._angular = angular
+			self._linear = 0
+			ok = True
             if not ok:
                 self._interface.beep()
         elif keycode in speed_bindings:
@@ -157,9 +164,11 @@ class KeyTeleop():
                 self._linear = acc[0]
             if acc[1] is not None:
                 self._angular = acc[1]
-
         elif keycode == ord('q'):
+            self._running = False
             rospy.signal_shutdown('Bye')
+        elif keycode >= ord('a') and keycode <= ord('z'):
+            self._cmd_char = keycode
         else:
             return False
 
@@ -169,92 +178,28 @@ class KeyTeleop():
         self._interface.clear()
         self._interface.write_line(2, 'Linear: %d, Angular: %d' % (self._linear, self._angular))
         self._interface.write_line(5, 'Use arrow keys to move, space to stop, q to exit.')
-        self._interface.refresh()
-
-        twist = self._get_twist(self._linear, self._angular)
-        self._pub_cmd.publish(twist)
-
-
-class SimpleKeyTeleop():
-    def __init__(self, interface):
-        self._interface = interface
-        self._pub_cmd = rospy.Publisher('key_vel', Twist)
-
-        self._hz = rospy.get_param('~hz', 10)
-
-        self._forward_rate = rospy.get_param('~forward_rate', 0.8)
-        self._backward_rate = rospy.get_param('~backward_rate', 0.5)
-        self._rotation_rate = rospy.get_param('~rotation_rate', 1.0)
-        self._last_pressed = {}
-        self._angular = 0
-        self._linear = 0
-
-    movement_bindings = {
-        curses.KEY_UP:    ( 1,  0),
-        curses.KEY_DOWN:  (-1,  0),
-        curses.KEY_LEFT:  ( 0,  1),
-        curses.KEY_RIGHT: ( 0, -1),
-    }
-
-    def run(self):
-        rate = rospy.Rate(self._hz)
-        self._running = True
-        while self._running:
-            while True:
-                keycode = self._interface.read_key()
-                if keycode is None:
-                    break
-                self._key_pressed(keycode)
-            self._set_velocity()
-            self._publish()
-            rate.sleep()
-
-    def _get_twist(self, linear, angular):
-        twist = Twist()
-        twist.linear.x = linear
-        twist.angular.z = angular
-        return twist
-
-    def _set_velocity(self):
-        now = rospy.get_time()
-        keys = []
-        for a in self._last_pressed:
-            if now - self._last_pressed[a] < 0.4:
-                keys.append(a)
-        linear = 0.0
-        angular = 0.0
-        for k in keys:
-            l, a = self.movement_bindings[k]
-            linear += l
-            angular += a
-        if linear > 0:
-            linear = linear * self._forward_rate
+        if self._cmd_char!=-1:
+            self._cmd_last_char = self._cmd_char
+        if self._cmd_last_char!=-1:
+            self._interface.write_line(7, 'Last input command %c' % (self._cmd_last_char))
         else:
-            linear = linear * self._backward_rate
-        angular = angular * self._rotation_rate
-        self._angular = angular
-        self._linear = linear
-
-    def _key_pressed(self, keycode):
-        if keycode == ord('q'):
-            self._running = False
-            rospy.signal_shutdown('Bye')
-        elif keycode in self.movement_bindings:
-            self._last_pressed[keycode] = rospy.get_time()
-
-    def _publish(self):
-        self._interface.clear()
-        self._interface.write_line(2, 'Linear: %f, Angular: %f' % (self._linear, self._angular))
-        self._interface.write_line(5, 'Use arrow keys to move, q to exit.')
+            self._interface.write_line(7, 'Have no input yet')
         self._interface.refresh()
 
         twist = self._get_twist(self._linear, self._angular)
         self._pub_cmd.publish(twist)
+
+        if self._cmd_char!=-1:
+            c = Char()
+            c.data = self._cmd_char
+            self._pub_key_cmd.publish(c)
+            self._cmd_char = -1
 
 
 def main(stdscr):
     rospy.init_node('key_teleop')
-    app = SimpleKeyTeleop(TextWindow(stdscr))
+    #app = SimpleKeyTeleop(TextWindow(stdscr))
+    app = KeyTeleop(TextWindow(stdscr))
     app.run()
 
 if __name__ == '__main__':
